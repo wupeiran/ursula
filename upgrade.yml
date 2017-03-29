@@ -1,8 +1,8 @@
 # Play for upgrading from one version of OpenStack to another.
-# Heavily flavored for Havana to Juno for now, but useful as a model for
-# future upgrades. NOT a rolling upgrade optimized for downtime.
+# Ursula 1.2.x  to Urusla 2.1.x (Kilo)
+# NOT a rolling upgrade optimized for downtime.
 #
-# Assumes ml2 networking
+# cinder and ironic not accounted for (commented out) 
 ---
 - name: Remove existing package symlink
   hosts: all:!vyatta-*
@@ -18,6 +18,7 @@
   hosts: all:!vyatta-*
   max_fail_percentage: 1
   tags: kernelupgrade
+  environment: "{{ env_vars|default({}) }}"
 
   tasks:
     - name: upgrade kernel to trusty lts
@@ -27,6 +28,38 @@
         - linux-tools-lts-trusty
       when: ansible_distribution_version == "12.04"
 
+- name: set the facts
+  hosts: all:!vyatta-*
+  gather_facts: yes
+  tags: always
+  tasks:
+    - name: set the upgrade fact
+      set_fact:
+        upgrade: True
+
+    - name: set the git update fact
+      set_fact:
+        openstack_source:
+          git_update: yes
+
+- name: cleanups
+  hosts: all:!vyatta-*
+  gather_facts: no
+  tags: always
+  tasks:
+    - name: clean out existing apt repos
+      file:
+        path: /etc/apt/sources.list.d/
+        state: absent
+
+    - name: recreate apt sources directory
+      file:
+        path: /etc/apt/sources.list.d
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+
 - name: upgrade common bits first
   hosts: all:!vyatta-*
   max_fail_percentage: 1
@@ -34,77 +67,165 @@
   roles:
     - role: common
 
-- name: upgrade percona cluster in compat mode
-  hosts: db
-  max_fail_percentage: 1
-  tags: dbupgrade
+- name: upgrade rabbit for security
+  hosts: controller
   serial: 1
+  max_fail_percentage: 1
+  tags: rabbit
 
   tasks:
-    - name: check db version
-      command: mysql -V
-      changed_when: False
-      register: mysqlver
-
-    - include: upgrade-db-cluster.yml
-      when: not mysqlver.stdout|search('Distrib 5\.6')
-
-- name: upgrade percona arbiter
-  hosts: db_arbiter
-  max_fail_percentage: 1
-  tags: dbupgrade
-
-  pre_tasks:
-    - name: purge old garbd and configs
-      apt: name=percona-xtradb-cluster-garbd-2.x state=absent purge=true
-
-    - name: remove old garb config
-      file: path=/etc/default/garb state=absent
-
-    - name: garbd.log permissions
-      file: path=/var/log/garbd.log owner=nobody state=touch
-
-  roles:
-    - role: percona-common
-
-    - role: percona-arbiter
-
-- name: remove percona compat settings
-  hosts: db
-  max_fail_percentage: 1
-  tags: dbupgrade
-  serial: 1
-
-  tasks:
-    - name: remove compat settings
-      lineinfile: regexp="{{ item }}" state=absent
-                  dest=/etc/mysql/conf.d/replication.cnf
-      with_items:
-        - '^wsrep_provider_options\s*='
-        - '^log_bin_use_v1_row_events\s*='
-        - '^gtid_mode\s*='
-        - '^binlog_checksum\s*='
-        - '^read_only\s*='
-      notify: restart mysql
+    - name: upgrade rabbit
+      apt:
+        pkg: rabbitmq-server
+        state: latest
+      notify: restart-rabbit
+#      register: result
+#      until: result.rc == 0
+#      failed_when: false
+#      retries: 5
 
   handlers:
-    - name: restart mysql
-      service: name=mysql state=restarted
+    - name: restart-rabbit
+      service:
+        name: rabbitmq-server
+        state: restarted
+  environment: "{{ env_vars|default({}) }}"
 
-- name: upgrade rabbitmq
-  gather_facts: force
-  hosts: controller
+- name: upgrade client bits
+  hosts: all:!vyatta-*
   max_fail_percentage: 1
-  tags: rabbitmq
-  serial: 1
+  tags: client
+
+  pre_tasks:
+    - name: remove clients for re-install
+      pip:
+        name: "{{ item }}"
+        state: absent
+      with_items:
+        - python-openstackclient
+        - python-neutronclient
+        - python-heatclient
+        - python-novaclient
+        - python-keystoneclient
+#      register: result
+#      until: result.rc == 0
+#      failed_when: false
+#      retries: 5
 
   roles:
-    - role: rabbitmq
+    - role: client
+  environment: "{{ env_vars|default({}) }}"
+
+- name: stop the restarts
+  hosts: all:!vyatta-*
+  tags: always
+  tasks:
+    # work around Ansible 2.0 bug where parent roles do not see vars
+    # assigned to child roles
+    - name: turn restarts off
+      set_fact:
+        restart: False
+
+- name: dump keystone db
+  hosts: controller[0]
+  max_fail_percentage: 1
+  tasks:
+    - mysql_db:
+        name: keystone
+        state: dump
+        target: /backup/keystone-preupgrade.sql
+      run_once: True
+      tags: dbdump
+
+    # rip out old keystone endpoints
+    - name: delete endpoints
+      shell: mysql -e "DELETE FROM endpoint;" keystone
+
+    # rip out old keystone services
+    - name: delete services
+      shell: mysql -e "DELETE FROM service;" keystone
+
+- name: upgrade keystone
+  hosts: controller
+  max_fail_percentage: 1
+  tags: keystone
+  pre_tasks:
+    - name: stop haproxy # necessary b/c ports are changing and haproxy is holding some
+      service: name=haproxy state=stopped
+  roles:
+    - role: keystone
+      force_sync: true
+      restart: False
+      database_create:
+        changed: False
+  environment: "{{ env_vars|default({}) }}"
+
+# stop openstack services that have port conflicts w/ new haproxy config 
+- name: stop openstack services on controller
+  hosts: controller
+  max_fail_percentage: 1
+  tasks:
+    - name: stop service
+      service:
+        name: "{{ item }}"
+        state: stopped
+      with_items:
+        - cinder-api
+        - heat-api-cfn
+        - neutron-server
+        - heat-api
+
+# run haproxy
+- name: new haproxy config
+  hosts: controller
+  max_fail_percentage: 1
+  tags: haproxy
+  roles:
+    - role: haproxy 
+      haproxy_type: openstack
+  pre_tasks:
+    - name: backup haproxy.cnf
+      shell: cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.pre-upgrade
+  environment: "{{ env_vars|default({}) }}"
+
+# disable horizon so keystone-admin API will work
+- name: disable horizon
+  hosts: controller
+  max_fail_percentage: 1
+  tasks:
+    - name: disable horizon
+      apache2_site:
+        name: openstack_dashboard
+        state: absent
+
+# run keystone-setup
+- name: keystone setup
+  hosts: controller[0]
+  any_errors_fatal: true
+  tags: ['keystone-setup']
+  pre_tasks:
+    # These pre-tasks determine if keystone has been setup before. If so, the
+    # keystone-setup role tasks are skipped.
+    - name: discover keystone setup status
+      command: mysql --batch --silent keystone -e "select type from service where type = 'compute'"
+      failed_when: false
+      changed_when: false
+      register: keystone_setup
+
+    - name: set keystone_configured fact
+      set_fact: keystone_configured=True
+      when: keystone_setup.stdout|search("compute")
+
+  roles:
+    - role: keystone-setup
+      when: not hostvars[inventory_hostname].keystone_configured | default(False)
+  environment: "{{ env_vars|default({}) }}"
 
 - name: upgrade glance
   hosts: controller
   max_fail_percentage: 1
   tags: glance
+  environment: "{{ env_vars|default({}) }}"
 
   pre_tasks:
     - name: dump glance db
@@ -122,79 +243,81 @@
       database_create:
         changed: false
 
-# Cinder block
-- name: stage cinder data software
-  hosts: cinder_volume
-  max_fail_percentage: 1
-  tags:
-    - cinder
-    - cinder-volume
-
-  roles:
-    - role: cinder-data
-      restart: False
-
-    - role: stop-services
-      services:
-        - cinder-volume
-
-- name: stage cinder control software and stop services
-  hosts: controller
-  max_fail_percentage: 1
-  tags:
-    - cinder
-    - cinder-control
-
-  pre_tasks:
-    - name: dump cinder db
-      mysql_db:
-        name: cinder
-        state: dump
-        target: /backup/cinder-preupgrade.sql
-      run_once: True
-      tags: dbdump
-
-  roles:
-    - role: cinder-control
-      force_sync: true
-      restart: False
-      database_create:
-        changed: false
-
-- name: start cinder data services
-  hosts: cinder_volume
-  max_fail_percentage: 1
-  tags:
-    - cinder
-    - cinder-volume
-
-  tasks:
-    - name: start cinder data services
-      service: name=cinder-volume state=started
-
-- name: ensure cinder v2 endpoint
-  hosts: controller[0]
-  max_fail_percentage: 1
-  tags:
-    - cinder
-    - cinder-endpoint
-
-  tasks:
-    - name: cinder v2 endpoint
-      keystone_service: name={{ item.name }}
-                        type={{ item.type }}
-                        description='{{ item.description }}'
-                        public_url={{ item.public_url }}
-                        internal_url={{ item.internal_url }}
-                        admin_url={{ item.admin_url }}
-                        region=RegionOne
-                        auth_url={{ endpoints.auth_uri }}
-                        tenant_name=admin
-                        login_user=admin
-                        login_password={{ secrets.admin_password }}
-      with_items: keystone.services
-      when: endpoints[item.name] is defined and endpoints[item.name]
-            and item.name == 'cinderv2'
+## Cinder block
+#- name: stage cinder data software
+#  hosts: cinder_volume
+#  max_fail_percentage: 1
+#  tags:
+#    - cinder
+#    - cinder-volume
+#
+#  roles:
+#    - role: cinder-data
+#      restart: False
+#      when: cinder.enabled|bool
+#
+#    - role: stop-services
+#      services:
+#        - cinder-volume
+#
+#- name: stage cinder control software and stop services
+#  hosts: controller
+#  max_fail_percentage: 1
+#  tags:
+#    - cinder
+#    - cinder-control
+#
+#  pre_tasks:
+#    - name: dump cinder db
+#      mysql_db:
+#        name: cinder
+#        state: dump
+#        target: /backup/cinder-preupgrade.sql
+#      run_once: True
+#      tags: dbdump
+#
+#  roles:
+#    - role: cinder-control
+#      force_sync: true
+#      restart: False
+#      database_create:
+#        changed: false
+#
+#
+#- name: start cinder data services
+#  hosts: cinder_volume
+#  max_fail_percentage: 1
+#  tags:
+#    - cinder
+#    - cinder-volume
+#
+#  tasks:
+#    - name: start cinder data services
+#      service: name=cinder-volume state=started
+#
+#- name: ensure cinder v2 endpoint
+#  hosts: controller[0]
+#  max_fail_percentage: 1
+#  tags:
+#    - cinder
+#    - cinder-endpoint
+#
+#  tasks:
+#    - name: cinder v2 endpoint
+#      keystone_service: name={{ item.name }}
+#                        type={{ item.type }}
+#                        description='{{ item.description }}'
+#                        public_url={{ item.public_url }}
+#                        internal_url={{ item.internal_url }}
+#                        admin_url={{ item.admin_url }}
+#                        region=RegionOne
+#                        auth_url={{ endpoints.auth_uri }}
+#                        tenant_name=admin
+#                        login_user=admin
+#                        login_password={{ secrets.admin_password }}
+#      with_items: keystone.services
+#      when: endpoints[item.name] is defined and endpoints[item.name]
+#            and item.name == 'cinderv2'
 
 # Nova block
 - name: stage nova compute
@@ -203,6 +326,7 @@
   tags:
     - nova
     - nova-data
+  environment: "{{ env_vars|default({}) }}"
 
   roles:
     - role: nova-data
@@ -220,6 +344,7 @@
   tags:
     - nova
     - nova-control
+  environment: "{{ env_vars|default({}) }}"
 
   pre_tasks:
     - name: dump nova db
@@ -250,31 +375,31 @@
       when: ironic.enabled == False
 
 # Ironic block
-- name: upgrade ironic control
-  hosts: controller
-  max_fail_percentage: 1
-  tags: ironic
-
-  roles:
-    - role: stop-services
-      services:
-        - nova-compute
-      when: ironic.enabled == True
-
-    - role: ironic-control
-      force_sync: true
-      restart: False
-      database_create:
-        changed: False
-      when: ironic.enabled == True
-
-    - role: ironic-data
-      when: ironic.enabled == True
-
-  tasks:
-    - name: start nova compute
-      service: name=nova-compute state=started
-      when: ironic.enabled == True
+#- name: upgrade ironic control
+#  hosts: controller
+#  max_fail_percentage: 1
+#  tags: ironic
+#
+#  roles:
+#    - role: stop-services
+#      services:
+#        - nova-compute
+#      when: ironic.enabled == True
+#
+#    - role: ironic-control
+#      force_sync: true
+#      restart: False
+#      database_create:
+#        changed: False
+#      when: ironic.enabled == True
+#
+#    - role: ironic-data
+#      when: ironic.enabled == True
+#
+#  tasks:
+#    - name: start nova compute
+#      service: name=nova-compute state=started
+#      when: ironic.enabled == True
 
 # Neutron block
 - name: stage neutron core data
@@ -294,6 +419,7 @@
   tags:
     - neutron
     - neutron-network
+  environment: "{{ env_vars|default({}) }}"
 
   roles:
     - role: neutron-data-network
@@ -305,6 +431,7 @@
   tags:
     - neutron
     - neutron-control
+  environment: "{{ env_vars|default({}) }}"
 
   pre_tasks:
     - name: dump neutron db
@@ -315,19 +442,19 @@
       run_once: True
       tags: dbdump
 
-    - name: check db version
-      command: neutron-db-manage --config-file /etc/neutron/neutron.conf
-               --config-file /etc/neutron/plugins/ml2/ml2_plugin.ini
-               current
-      register: neutron_db_ver
-      run_once: True
-
-    - name: stamp neutron to havana
-      command: neutron-db-manage --config-file /etc/neutron/neutron.conf
-               --config-file /etc/neutron/plugins/ml2/ml2_plugin.ini
-               stamp havana
-      when: not neutron_db_ver.stdout|search('juno')
-      run_once: True
+#    - name: check db version
+#      command: neutron-db-manage --config-file /etc/neutron/neutron.conf
+#               --config-file /etc/neutron/plugins/ml2/ml2_plugin.ini
+#               current
+#      register: neutron_db_ver
+#      run_once: True
+#
+#    - name: stamp neutron to havana
+#      command: neutron-db-manage --config-file /etc/neutron/neutron.conf
+#               --config-file /etc/neutron/plugins/ml2/ml2_plugin.ini
+#               stamp havana
+#      when: not neutron_db_ver.stdout|search('juno')
+#      run_once: True
 
   roles:
     - role: neutron-control
@@ -366,6 +493,7 @@
   hosts: controller
   max_fail_percentage: 1
   tags: heat
+  environment: "{{ env_vars|default({}) }}"
 
   roles:
     - role: heat
@@ -379,6 +507,7 @@
   hosts: swiftnode
   any_errors_fatal: true
   tags: swift
+  environment: "{{ env_vars|default({}) }}"
 
   roles:
     - role: haproxy
@@ -397,33 +526,14 @@
     - role: swift-proxy
       tags: ['openstack', 'swift', 'control']
 
-- name: upgrade keystone
-  hosts: controller
-  max_fail_percentage: 1
-  tags: keystone
-
-  pre_tasks:
-    - name: dump keystone db
-      mysql_db:
-        name: keystone
-        state: dump
-        target: /backup/keystone-preupgrade.sql
-      run_once: True
-      tags: dbdump
-
-  roles:
-    - role: keystone
-      force_sync: true
-      restart: False
-      database_create:
-        changed: False
 
 - name: upgrade horizon
   hosts: controller
   max_fail_percentage: 1
   tags: horizon
+  environment: "{{ env_vars|default({}) }}"
 
   roles:
     - role: horizon
 
-- include: site.yml
+# - include: site.yml
