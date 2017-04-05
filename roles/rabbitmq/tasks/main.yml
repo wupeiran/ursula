@@ -33,7 +33,7 @@
     pkg: "{{ item }}"
     update_cache: yes
   with_items:
-    - rabbitmq-server=3.6.6*
+    - rabbitmq-server=3.6.9*
   when: upgrade | default('False') | bool
 
 - name: add rabbitmq environment configuration
