@@ -9,7 +9,7 @@ ceph:
   #bcache_ssd_device: sdg
 
   version: 10.2.3~bbc1
-  ceph_cloud_archive_version: 10.2.3-0ubuntu0.16.04.2~cloud0
+  ceph_cloud_archive_version: 10.2.6-0ubuntu0.16.04.1~cloud0
 
   openstack_keys:
     - { name: client.glance, value: "mon 'allow r' osd 'allow class-read object_prefix rbd_children, allow rwx'" }
