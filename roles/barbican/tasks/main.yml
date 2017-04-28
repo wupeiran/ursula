@@ -17,8 +17,18 @@
   file: dest=/etc/barbican state=directory owner=barbican group=barbican
 
 - name: barbican log dir
-  file: dest=/var/log/barbican state=directory mode=0755 owner=barbican
+  file: dest=/var/log/barbican state=directory mode=0755 owner=barbican group=adm
 
+- name: Change barbican log dir acl
+  acl: name=/var/log/barbican state=present default=yes etype={{ item.etype }} permissions={{ item.permission }}
+  with_items:
+    - etype: user
+      permission: rw
+    - etype: group
+      permission: r
+    - etype: other
+      permission: r
+      
 - name: create barbican cache dir
   file: dest=/var/cache/barbican state=directory mode=0700
         owner=barbican group=barbican

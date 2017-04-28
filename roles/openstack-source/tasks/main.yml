@@ -39,14 +39,14 @@
     src: files/constraints.txt
     dest: /opt/stack/constraints.txt
     force: true
-  when: upper_constraints == None
+  when: (upper_constraints is none) or (upper_constraints | trim == '')
 
 - name: get constraints file
   get_url:
     url: "{{ upper_constraints }}"
     dest: /opt/stack/constraints.txt
     force: true
-  when: upper_constraints != None
+  when: not((upper_constraints is none) or (upper_constraints | trim == ''))
 
 - name: set pip constraints args
   set_fact:
