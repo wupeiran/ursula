@@ -186,6 +186,9 @@ nova:
       ephemeral: 0
       vcpus: 8
 
+barbican:
+  enabled: True
+  
 ceph:
   enabled: false
   #disks:
@@ -193,9 +196,6 @@ ceph:
   #  - sdc
   #  - sdd
   #bcache_ssd_device: sdg
-
-lvm:
-  enabled: false
 
 cinder:
   enabled: True
@@ -356,6 +356,9 @@ keystone:
     - name: aodh
       password: "{{ secrets.service_password }}"
       tenant: service
+    - name: barbican
+      password: "{{ secrets.service_password }}"
+      tenant: service
   user_roles:
     - user: admin
       tenant: admin
@@ -411,6 +414,9 @@ keystone:
     - user: aodh
       tenant: service
       role: admin
+    - user: barbican
+      tenant: service
+      role: admin
   services:
     - name: keystone
       type: identity
@@ -454,12 +460,6 @@ keystone:
       public_url: "{{ endpoints.cinderv2.url.public }}/{{ endpoints.cinderv2.url.path }}"
       internal_url: "{{ endpoints.cinderv2.url.internal }}/{{ endpoints.cinderv2.url.path }}"
       admin_url: "{{ endpoints.cinderv2.url.admin }}/{{ endpoints.cinderv2.url.path }}"
-    - name: cinderv3
-      type: volumev3
-      description: 'Volume Service v3'
-      public_url: "{{ endpoints.cinderv3.url.public }}/{{ endpoints.cinderv3.url.path }}"
-      internal_url: "{{ endpoints.cinderv3.url.internal }}/{{ endpoints.cinderv3.url.path }}"
-      admin_url: "{{ endpoints.cinderv3.url.admin }}/{{ endpoints.cinderv3.url.path }}"
     - name: heat
       type: orchestration
       description: 'Heat Orchestration API'
@@ -502,6 +502,12 @@ keystone:
       public_url: "{{ endpoints.aodh.url.public }}"
       internal_url: "{{ endpoints.aodh.url.internal }}"
       admin_url: "{{ endpoints.aodh.url.admin }}"
+    - name: barbican
+      type: key-manager
+      description: 'Key Management Service'
+      public_url: "{{ endpoints.barbican.url.public }}"
+      internal_url: "{{ endpoints.barbican.url.internal }}"
+      admin_url: "{{ endpoints.barbican.url.admin }}"
   federation:
     enabled: False
 
