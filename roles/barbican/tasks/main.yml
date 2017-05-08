@@ -64,6 +64,16 @@
     uwsgi_path: "{{ openstack_package.virtualenv_base }}/barbican/bin/uwsgi"
   when: openstack_install_method == 'package' and ursula_os == 'ubuntu'
 
+- name: install uwsgi package for barbican
+  pip:
+    name: uwsgi
+    virtualenv: "{{ openstack_package.virtualenv_base }}/barbican"
+  register: result
+  until: result|succeeded
+  retries: 5
+  no_log: true
+  when: openstack_install_method == 'package' and ursula_os == 'ubuntu'
+  
 - name: install barbican uwsgi service (ubuntu)
   template:
     src: etc/init/barbican.conf
